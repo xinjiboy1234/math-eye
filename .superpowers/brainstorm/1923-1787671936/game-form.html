@@ -1,0 +1,67 @@
+<h2>游戏化的"世界"长什么样？</h2>
+<p class="subtitle">知识图谱如何变成游戏体验 —— 三种经典范式，选一个作为主框架（可以组合）</p>
+
+<div class="cards">
+  <div class="card" data-choice="skilltree" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <svg viewBox="0 0 260 150" width="100%" height="140">
+        <line x1="130" y1="120" x2="80" y2="75" stroke="#888" stroke-width="2"/>
+        <line x1="130" y1="120" x2="180" y2="75" stroke="#888" stroke-width="2"/>
+        <line x1="80" y1="75" x2="40" y2="35" stroke="#bbb" stroke-width="2" stroke-dasharray="4"/>
+        <line x1="80" y1="75" x2="115" y2="30" stroke="#bbb" stroke-width="2" stroke-dasharray="4"/>
+        <line x1="180" y1="75" x2="220" y2="35" stroke="#bbb" stroke-width="2" stroke-dasharray="4"/>
+        <circle cx="130" cy="120" r="14" fill="#4a90d9"/>
+        <circle cx="80" cy="75" r="12" fill="#4a90d9"/>
+        <circle cx="180" cy="75" r="12" fill="#7bc47f"/>
+        <circle cx="40" cy="35" r="10" fill="#eee" stroke="#f5a623" stroke-width="3"/>
+        <circle cx="115" cy="30" r="10" fill="#eee" stroke="#f5a623" stroke-width="3"/>
+        <circle cx="220" cy="35" r="10" fill="#ddd"/>
+        <text x="130" y="145" text-anchor="middle" font-size="10">算术</text>
+        <text x="80" y="98" text-anchor="middle" font-size="10">方程</text>
+        <text x="185" y="98" text-anchor="middle" font-size="10">函数</text>
+      </svg>
+    </div>
+    <div class="card-body">
+      <h3>A · 技能树图谱</h3>
+      <p>知识图谱本身就是游戏地图。节点 = 知识点，解锁依赖关系 = 天赋树。已掌握发亮、可学习高亮闪烁、未解锁灰暗。"研究者模式"下同一棵树延伸到研究生级内容。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="journey" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <svg viewBox="0 0 260 150" width="100%" height="140">
+        <path d="M20 120 C 70 60, 110 130, 150 70 S 230 40, 245 30" fill="none" stroke="#ccc" stroke-width="8" stroke-linecap="round"/>
+        <path d="M20 120 C 70 60, 110 130" fill="none" stroke="#4a90d9" stroke-width="8" stroke-linecap="round"/>
+        <circle cx="20" cy="120" r="11" fill="#4a90d9"/>
+        <circle cx="85" cy="103" r="11" fill="#4a90d9"/>
+        <circle cx="150" cy="70" r="11" fill="#f5a623" stroke="#fff" stroke-width="2"/>
+        <circle cx="200" cy="48" r="11" fill="#ddd"/>
+        <circle cx="243" cy="31" r="11" fill="#ddd"/>
+        <text x="150" y="105" text-anchor="middle" font-size="10">⭐ 当前关卡</text>
+      </svg>
+    </div>
+    <div class="card-body">
+      <h3>B · 关卡旅程地图</h3>
+      <p>Duolingo 式的蜿蜒路径，每关是一个知识点或题目组合。上手门槛最低，最适合低龄用户；但图谱感弱，研究者会觉得"线性无聊"，需要额外的自由探索模式补充。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="sandbox-world" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <svg viewBox="0 0 260 150" width="100%" height="140">
+        <rect x="15" y="15" width="105" height="55" rx="8" fill="#e8f4fd" stroke="#4a90d9" stroke-width="2"/>
+        <text x="67" y="40" text-anchor="middle" font-size="10">📐 几何平原</text>
+        <rect x="145" y="25" width="95" height="50" rx="8" fill="#fdf3e0" stroke="#f5a623" stroke-width="2"/>
+        <text x="192" y="53" text-anchor="middle" font-size="10">🎲 概率森林</text>
+        <rect x="40" y="90" width="90" height="45" rx="8" fill="#eee" stroke="#999" stroke-width="2"/>
+        <text x="85" y="116" text-anchor="middle" font-size="10">🔒 分析之巅</text>
+        <rect x="155" y="92" width="90" height="42" rx="8" fill="#eafaef" stroke="#7bc47f" stroke-width="2"/>
+        <text x="200" y="116" text-anchor="middle" font-size="10">🧩 代数镇</text>
+      </svg>
+    </div>
+    <div class="card-body">
+      <h3>C · 开放世界区域</h3>
+      <p>数学领域 = 大陆/区域，知识点 = 区域内的地点。自由探索 + 支线任务（如"证明挑战"）。沉浸感和研究者气质最强，但引导性差、内容制作成本最高。</p>
+    </div>
+  </div>
+</div>
