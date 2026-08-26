@@ -106,8 +106,9 @@ Electron/双进程、Pyodide/WASM、知识图谱迷雾地图、Elo 掌握度、�
 - `plot_spec.sliders`：自由符号参数成为前端滑动条（联动重算），默认范围由阶段 1 给出。
 - `compute_spec`：compute 类问题由阶段 1 在此给出计算表达式（流式开始前已确定，见 §4.2）。
 
-- 本地规则兜底：检测 `solve/diff/integrate/化简` 等命令词 → 直接判 `compute`，跳过部分 LLM 调用以省 token；阶段 1 的 LLM **调用失败**同样降级到本地规则（至少可识别 compute 命令词），整体调用失败才走 §9 的"重试中"。
+- 本地规则兜底：检测 `solve/diff/integrate/化简` 等命令词 → 直接判 `compute`，跳过部分 LLM 调用以省 token；阶段 1 的 LLM **调用失败**同样降级到本地规则（至少可识别 compute 命令词）；仅当网关重试一次后仍失败（§9 的"重试中"）才中断本请求。
 - `plot_spec` 中的表达式在阶段 1 输出时即校验（SymPy `parse_expr` 解析 + 语法验证），校验失败重试一次；仍失败 → `needs_plot=false` 并提示无法绘图——校验发生在 `meta` 事件发出前。
+- `compute_spec` 与 plot_spec 同等契约：阶段 1 输出时即校验（`parse_expr`），失败重试一次；仍失败或执行期异常（如 solve 无解）→ 降级按 conceptual 处理并附错误提示，不中断流。
 - 结构化输出解析失败 → 重试一次（带上次输出提示修正）；两次仍失败 → 本地规则兜底（默认按 conceptual、无错误、无绘图处理），流程继续不中断。
 
 ### 4.2 阶段 2：回答（主调用，SSE 流式）
@@ -120,7 +121,7 @@ Electron/双进程、Pyodide/WASM、知识图谱迷雾地图、Elo 掌握度、�
 - `contains_error = true` → **纠错模式**（见 §4.3）。
 - 其余 → 常规回答模式。
 
-输出：`reply_markdown`（KaTeX 渲染）+ `topics` + 关联卡片数据 + 可选 `followup_exercise`（"再练一道"按钮触发，LLM 生成 + SymPy 验证答案）。
+输出：`reply_markdown`（KaTeX 渲染）+ `topics` + 关联卡片数据 + 可选 `followup_exercise`（"再练一道"按钮触发，LLM 生成 + SymPy 验证答案）。**关联卡片机制**：基于知识点记忆共现统计 + LLM 判断生成，取 ≤3 条密切相关。
 
 **验证流程（断言由生成方声明，验证由确定性引擎执行）**：
 - 阶段 2 输出除 `reply_markdown` 外，附带 `assertions: [{claim, sympy_expr, expected}]`——LLM 声明它做出的每个可验证数学断言，`sympy_expr` 为 SymPy 可解析形式；`reply_markdown` 中用 `{{assert:N}}` 占位符锚定每条断言在文中的位置。
@@ -148,7 +149,8 @@ Electron/双进程、Pyodide/WASM、知识图谱迷雾地图、Elo 掌握度、�
 - 题库：LLM 按档位生成 + SymPy 验证答案，存 `question` 表（DDL 见 §7）；**容量策略**：每档位上限（默认 50 题），超出按 `used_count` LRU 淘汰；**生成归属**：`/api/assess/next` 命中缓存直接返回，未命中时同步生成（LLM + SymPy 验证）后缓存——首启首次取题有一次生成延迟；**选题规则**：按档位随机抽取，该档位高频 misconception 关联知识点加权（权重 = 1 + 0.5·log(count)，见 §6）。题库自动增长机制属后续可选，见 §12。
 - 首次启动展示向导：选年龄段/学历 → 对应档位题库抽 3-5 题。
 - 每题测两个维度：**概念熟悉度**（"听过这个吗？"→ 术语接受度估计）+ **计算正确性**（算一遍）。
-- 结果 → 画像档位（小学/初中/高中/大学/研究）+ 三维系数（familiarity / computation / terminology），注入 system prompt 控制解释的专业程度。**档位规则**：`level_band` 初值 = 用户所选学历；测试后**解释档位 = 基础档位经系数调整**（确定性规则）：`familiarity` 与 `terminology` 均 ≥ 0.7 且 `computation` ≥ 0.7 → 升一档；任一系数 ≤ 0.3 → 降一档；其余保持，结果夹在 primary..research 范围。测试结果与所选学历冲突时以测试结果为准并提示用户。`age_band` 与知识水平正交：仅用于语风（儿童/成人）与内容边界（未成年人），不参与难度推导。
+- 结果 → 画像档位（小学/初中/高中/大学/研究）+ 三维系数（familiarity / computation / terminology），注入 system prompt 控制解释的专业程度。**档位规则**：`level_band` 初值 = 用户所选学历；测试后**解释档位 = 基础档位经系数调整**（确定性规则）：`familiarity` 与 `terminology` 均 ≥ 0.7 且 `computation` ≥ 0.7 → 升一档；任一系数 ≤ 0.3 → 降一档；其余保持，结果夹在 primary..research 范围。测试结果与所选学历冲突时以测试结果为准并提示用户。`age_band` 与知识水平正交：仅用于语风（child/teen → 儿童语气，adult/researcher → 成人语气）与内容边界（未成年人），不参与难度推导。
+- **维度映射与聚合**：概念题（"听过这个吗？"）更新 `familiarity`，并据"能看懂符号吗"的回答同步更新 `terminology` 估计；计算题更新 `computation`；3-5 题结果取均值（熟悉/正确 = 1，不熟/错误 = 0，部分 = 0.5）。
 - 可跳过（默认档位：高中）；可随时在设置中重测。
 
 **首启流程（无 key 门禁）**：
@@ -172,7 +174,7 @@ Electron/双进程、Pyodide/WASM、知识图谱迷雾地图、Elo 掌握度、�
 - 写入：阶段 2 结束后异步写入（知识点归一化合并别名、画像增量更新、misconception 累计计数）。
 - 读取：阶段 2 上下文组装时读取（该知识点历史 + 相关知识点 ≤3 + 相关问答摘要 + 高频 misconception）。
 - 检索实现：历史全文检索优先 SQLite FTS5（虚拟表与同步触发器随主表在实现时创建），否则 LIKE 兜底。
-- 管理：记忆面板可见、可编辑、一键清空、导出 JSON（导出结构：`{profile, topics, messages, misconceptions}`）。
+- 管理：记忆面板可见、可编辑、一键清空、导出 JSON（导出结构：`{profile, topics, messages, misconceptions}`）。**清空范围**：会话历史、知识点、画像、misconception、usage_log；**保留 api_key**（避免清空后无法使用）；清空后 profile 回到未测试态，重新触发测试向导。
 - 审计：所有更新走 `memory_event` 追加式日志；**例外：一键清空为整表删除**（隐私优先，不保留审计）；回滚语义 = 清空 + `POST /api/memory/import` 导入导出的 JSON 快照（设置页"从备份恢复"）。
 
 ## 7. 数据模型（SQLite DDL）
@@ -288,6 +290,7 @@ CREATE TABLE usage_log (
 | GET | `/api/memory/export` | 导出 JSON |
 | POST | `/api/memory/import` | 导入 JSON 快照（回滚/从备份恢复） |
 | GET/POST | `/api/settings/keys` | BYOK 多厂商录入/列表（掩码显示，不返回明文） |
+| DELETE | `/api/settings/keys/{provider}` | 删除某厂商 key；主 provider 由设置页当前选中项决定（存 config） |
 | POST | `/api/settings/retest` | 触发重测 |
 | GET | `/api/usage` | 本机记账（每 key 用量/费用估算） |
 
@@ -316,7 +319,7 @@ event: error      {code, message}
 - SymPy 验证失败区分两种：**断言错误**（LLM 幻觉）→ 修正标注后展示；**验证器无能为力** → ⚠️ 未验证标注。
 - 不变量：**验证失败的断言绝不展示为"已验证"**。
 - 未成年人/隐私：数据仅存本机；记忆可一键清空；导出功能供用户自持数据。
-- 成本：本机记账（记录每次调用的 token 数与耗时）；费用估算需用户配置各厂商单价，未配置时仅显示用量。
+- 成本：本机记账（记录每次调用的 token 数与耗时，存 `usage_log`）；费用估算需用户在设置页配置各厂商单价（存 `~/.matheye/config.json`），未配置时仅显示用量。
 
 ## 10. 测试策略
 
