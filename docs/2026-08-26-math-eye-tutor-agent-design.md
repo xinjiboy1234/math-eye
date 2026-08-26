@@ -94,10 +94,16 @@ Electron/双进程、Pyodide/WASM、知识图谱迷雾地图、Elo 掌握度、�
     {"kind": "misconception", "likely_cause": "分配律滥用", "related_topic": "binomial-expansion"}
   ],
   "needs_plot": true,
-  "plot_spec": {"type": "parametric", "exprs": ["cos(t)", "sin(t)"], "params": {"t": [0, 6.2832]}},
+  "plot_spec": {"type": "parametric", "exprs": ["a*cos(t)", "a*sin(t)"],
+                "params": {"t": [0, 6.2832]},
+                "sliders": [{"symbol": "a", "min": 0.5, "max": 3, "default": 1}]},
+  "compute_spec": {"op": "solve", "sympy_expr": "x**2 - 4"},
   "topics": ["binomial-expansion", "algebra"]
 }
 ```
+
+- `plot_spec.sliders`：自由符号参数成为前端滑动条（联动重算），默认范围由阶段 1 给出。
+- `compute_spec`：compute 类问题由阶段 1 在此给出计算表达式（流式开始前已确定，见 §4.2）。
 
 - 本地规则兜底：检测 `solve/diff/integrate/化简` 等命令词 → 直接判 `compute`，跳过部分 LLM 调用以省 token。
 - `plot_spec` 中的表达式由阶段 2 校验：SymPy `parse_expr` 解析 + 采样前语法验证，解析失败要求重生成。
@@ -109,15 +115,17 @@ Electron/双进程、Pyodide/WASM、知识图谱迷雾地图、Elo 掌握度、�
 
 分支：
 
-- `question_type = compute` → **答案由 SymPy 计算，LLM 不判定数学正确性**；解释/步骤由 LLM 措辞，但其中每个可验证断言必须经 SymPy 验证（验证通过才展示；无适用模板或验证失败时降级为仅展示答案 + ✅/⚠️ 徽标）。
+- `question_type = compute` → 计算由阶段 1 的 `compute_spec` 给出、后端 SymPy 执行，**LLM 不判定数学正确性**；解释/步骤由 LLM 措辞，其中每个可验证断言经 SymPy 验证（验证通过才标 ✅；验证失败时该断言降级为 ❌/⚠️，不阻断回答）。
 - `contains_error = true` → **纠错模式**（见 §4.3）。
 - 其余 → 常规回答模式。
 
 输出：`reply_markdown`（KaTeX 渲染）+ `topics` + 关联卡片数据 + 可选 `followup_exercise`（"再练一道"按钮触发，LLM 生成 + SymPy 验证答案）。
 
 **验证流程（断言由生成方声明，验证由确定性引擎执行）**：
-- 阶段 2 输出除 `reply_markdown` 外，附带 `assertions: [{claim, sympy_expr, expected}]`——LLM 声明它做出的每个可验证数学断言（等式/恒等式/解集/导数/积分），`sympy_expr` 为 SymPy 可解析形式。
-- 后端对每条断言执行 SymPy 验证：通过 → ✅；失败 → ❌（修正标注后展示）；`sympy_expr` 解析失败 → ⚠️ 未验证。
+- 阶段 2 输出除 `reply_markdown` 外，附带 `assertions: [{claim, sympy_expr, expected}]`——LLM 声明它做出的每个可验证数学断言，`sympy_expr` 为 SymPy 可解析形式；`reply_markdown` 中用 `{{assert:N}}` 占位符锚定每条断言在文中的位置。
+- **流式与验证的顺序契约**：`delta` 事件可先行渲染（占位符显示 ⏳ 验证中），流结束后后端逐条验证并发出 `assertion` 事件，前端据状态更新徽标——**任何断言在对应 assertion 事件到达且 status=verified 前绝不显示 ✅**。
+- **验证算法（按断言类型）**：恒等式 → `simplify(lhs - rhs) == 0`；解集 → 解集无序集合比较；导数/积分 → 符号 diff/integrate 对照 `expected`；`expected` 由引擎按类型复算或语义比较，不信任 LLM 自报结果。
+- 结果：通过 → ✅；失败 → ❌（修正标注后展示）；`sympy_expr` 解析失败 → ⚠️ 未验证。
 - 不变量：验证失败/未验证的断言绝不展示为"已验证"。
 
 ### 4.3 纠错模式（需求 4）
@@ -127,7 +135,7 @@ Electron/双进程、Pyodide/WASM、知识图谱迷雾地图、Elo 掌握度、�
 1. 区分三种错误：**问题本身含错误假设** / **推理过程错** / **结论错但过程对**——处理方式不同。
 2. 给出**可能的错误联想路径**：推断用户为何会这样想（如把 (a+b)² 错写成 a²+b² → 分配律滥用），用**最小反例**纠正，不直接说"错了"。
 3. 结构化输出 `error_type / misconception / example`，积累"常见错误联想"记录（进记忆，反哺入口测试题库选题）。
-4. 纠错后提供一道**同型验证题**（可选按钮），答对才记 `掌握`，否则记 `困惑`。
+4. 纠错后提供一道**同型验证题**（可选按钮，生命周期接口见 §8 `/api/exercise/*`），答对才记 `掌握`，否则记 `困惑`。
 
 ### 4.4 绘图数据流
 
@@ -135,10 +143,10 @@ Electron/双进程、Pyodide/WASM、知识图谱迷雾地图、Elo 掌握度、�
 
 ## 5. 入口测试（需求 1）
 
-- 题库：LLM 按档位生成 + SymPy 验证答案，本地缓存（MVP 为按需生成的**固定容量缓存**；题库自动增长机制属后续可选，见 §12）。
+- 题库：LLM 按档位生成 + SymPy 验证答案，存 `question` 表（DDL 见 §7）；**容量策略**：每档位上限（默认 50 题），超出按 `used_count` LRU 淘汰；**生成归属**：`/api/assess/next` 命中缓存直接返回，未命中时同步生成（LLM + SymPy 验证）后缓存——首启首次取题有一次生成延迟。题库自动增长机制属后续可选，见 §12。
 - 首次启动展示向导：选年龄段/学历 → 对应档位题库抽 3-5 题。
 - 每题测两个维度：**概念熟悉度**（"听过这个吗？"→ 术语接受度估计）+ **计算正确性**（算一遍）。
-- 结果 → 画像档位（小学/初中/高中/大学/研究）+ 三维系数（familiarity / computation / terminology），注入 system prompt 控制解释的专业程度。
+- 结果 → 画像档位（小学/初中/高中/大学/研究）+ 三维系数（familiarity / computation / terminology），注入 system prompt 控制解释的专业程度。**档位规则**：`level_band` 初值 = 用户所选学历，测试后解释档位由 `level_band` + 三维系数共同推导；测试结果与所选学历冲突时以测试结果为准并提示用户。
 - 可跳过（默认档位：高中）；可随时在设置中重测。
 
 **首启流程（无 key 门禁）**：
@@ -163,7 +171,7 @@ Electron/双进程、Pyodide/WASM、知识图谱迷雾地图、Elo 掌握度、�
 - 读取：阶段 2 上下文组装时读取（该知识点历史 + 相关知识点 ≤3 + 相关问答摘要 + 高频 misconception）。
 - 检索实现：历史全文检索优先 SQLite FTS5（运行时可用时），否则 LIKE 兜底。
 - 管理：记忆面板可见、可编辑、一键清空、导出 JSON（导出结构：`{profile, topics, messages, misconceptions}`）。
-- 审计：所有更新走 `memory_event` 追加式日志；回滚语义 = 清空 + 导入导出的 JSON 快照。
+- 审计：所有更新走 `memory_event` 追加式日志；**例外：一键清空为整表删除**（隐私优先，不保留审计）；回滚语义 = 清空 + `POST /api/memory/import` 导入导出的 JSON 快照（设置页"从备份恢复"）。
 
 ## 7. 数据模型（SQLite DDL）
 
@@ -201,10 +209,22 @@ CREATE TABLE kp_status (
 CREATE TABLE misconception (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   kp_id          TEXT REFERENCES knowledge_point(id),
+  error_type     TEXT,                -- hypothesis / process / conclusion
   cause          TEXT,                -- 错误联想原因（如 分配律滥用）
   example        TEXT,                -- 最小反例
   count          INTEGER DEFAULT 1,   -- 出现次数，选题按此排序
   last_seen_at   TEXT
+);
+
+-- 入口测试题库（固定容量缓存，见 §5）
+CREATE TABLE question (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  level_band     TEXT,                -- 对应档位
+  kind           TEXT,                -- concept / computation
+  body           TEXT NOT NULL,       -- JSON：题干 + 选项/期望答案
+  answer_verified TEXT,               -- SymPy 验证过的答案
+  used_count     INTEGER DEFAULT 0,   -- 出题次数，LRU 淘汰依据
+  created_at     TEXT
 );
 
 -- 会话历史
@@ -243,7 +263,9 @@ CREATE TABLE api_key (
 | POST | `/api/chat` | 阶段 1+2 完整管线，SSE 流式（请求体 `{message, session_id?}`） |
 | POST | `/api/plot/from-expr` | 公式 → plot_spec（复用阶段 1 分析的 needs_plot 分支，"画出来"按钮入口） |
 | POST | `/api/assess/submit` | 入门测试逐题提交，返回画像更新 |
-| GET | `/api/assess/next` | 取下一道测试题（按档位选题） |
+| GET | `/api/assess/next` | 取下一道测试题（按档位选题；缓存未命中时同步生成） |
+| POST | `/api/exercise/generate` | 生成同型验证题（LLM + SymPy 验证答案），请求体 `{kp_id?}` |
+| POST | `/api/exercise/submit` | 提交习题答案：SymPy 与已验证答案比较判定 → 更新 kp_status（答对→mastered，答错→mistaken/confused）→ 返回判定与反馈 |
 | POST | `/api/plot` | plot_spec → 点集（SymPy 采样） |
 | GET | `/api/memory/topics` | 知识点时间线 |
 | GET | `/api/memory/history?q=` | 会话历史检索 |
@@ -251,6 +273,7 @@ CREATE TABLE api_key (
 | PUT | `/api/memory` | 编辑记忆条目 |
 | DELETE | `/api/memory` | 一键清空 |
 | GET | `/api/memory/export` | 导出 JSON |
+| POST | `/api/memory/import` | 导入 JSON 快照（回滚/从备份恢复） |
 | GET/POST | `/api/settings/keys` | BYOK 多厂商录入/列表（掩码显示，不返回明文） |
 | POST | `/api/settings/retest` | 触发重测 |
 | GET | `/api/usage` | 本机记账（每 key 用量/费用估算） |
@@ -285,14 +308,16 @@ event: error      {code, message}
 | 分析器 | pytest + mock LLM | 输出 schema 校验、错误检测触发、compute 路由 |
 | 记忆 | pytest | 知识点归一化合并别名、画像增量更新、事件追加 |
 | 数学引擎 | pytest | SymPy 往返一致性（parse_expr↔lambdify）、验证器正反例 |
-| 管线集成 | pytest | 阶段 1→2 全链路、纠错模式分支、验证徽标 |
+| 管线集成 | pytest | 阶段 1→2 全链路、纠错模式分支、验证徽标、断言锚定（占位符↔assertion 事件） |
+| LLM 网关 | pytest + mock | 重试、结构化输出解析失败重试、失败降级（"重试中"） |
+| SSE 契约 | pytest | 事件序列与载荷 schema（meta/delta/assertion/card/exercise/done/error） |
 | E2E | Playwright | 启动 → 入门测试 → 提问 → 绘图 → 关联卡片 → 记忆更新闭环 |
 
 关键不变量（写成自动化断言）：
 
-1. `memory_event` 只增不改；
+1. `memory_event` 只增不改（例外：一键清空为整表删除，见 §6）；
 2. 验证失败的断言不展示为"已验证"；
-3. compute 类问题的数学结论必须经 SymPy 验证后才展示（LLM 不判定数学正确性）。
+3. 任何数学结论仅在对应 assertion 事件 status=verified 后显示 ✅（LLM 不判定数学正确性）；验证前/失败显式标注 ⏳/❌/⚠️。
 
 ## 11. UI 布局（5 区块，中文界面）
 
