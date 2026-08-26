@@ -109,13 +109,16 @@ Electron/双进程、Pyodide/WASM、知识图谱迷雾地图、Elo 掌握度、�
 
 分支：
 
-- `question_type = compute` → 直接 SymPy 计算，不走生成（答案 + 步骤由计算引擎产出，LLM 仅负责措辞）。
+- `question_type = compute` → **答案由 SymPy 计算，LLM 不判定数学正确性**；解释/步骤由 LLM 措辞，但其中每个可验证断言必须经 SymPy 验证（验证通过才展示；无适用模板或验证失败时降级为仅展示答案 + ✅/⚠️ 徽标）。
 - `contains_error = true` → **纠错模式**（见 §4.3）。
 - 其余 → 常规回答模式。
 
 输出：`reply_markdown`（KaTeX 渲染）+ `topics` + 关联卡片数据 + 可选 `followup_exercise`（"再练一道"按钮触发，LLM 生成 + SymPy 验证答案）。
 
-**验证流程**：回答中所有可验证的数学断言（等式/恒等式/解集/导数/积分）→ 提取 → SymPy 验证 → 通过则展示 ✅ 徽标，失败则区分"断言错误"（修正后展示并说明）与"验证器无能为力"（展示 ⚠️ 未验证）。
+**验证流程（断言由生成方声明，验证由确定性引擎执行）**：
+- 阶段 2 输出除 `reply_markdown` 外，附带 `assertions: [{claim, sympy_expr, expected}]`——LLM 声明它做出的每个可验证数学断言（等式/恒等式/解集/导数/积分），`sympy_expr` 为 SymPy 可解析形式。
+- 后端对每条断言执行 SymPy 验证：通过 → ✅；失败 → ❌（修正标注后展示）；`sympy_expr` 解析失败 → ⚠️ 未验证。
+- 不变量：验证失败/未验证的断言绝不展示为"已验证"。
 
 ### 4.3 纠错模式（需求 4）
 
@@ -132,28 +135,35 @@ Electron/双进程、Pyodide/WASM、知识图谱迷雾地图、Elo 掌握度、�
 
 ## 5. 入口测试（需求 1）
 
+- 题库：LLM 按档位生成 + SymPy 验证答案，本地缓存（MVP 为按需生成的**固定容量缓存**；题库自动增长机制属后续可选，见 §12）。
 - 首次启动展示向导：选年龄段/学历 → 对应档位题库抽 3-5 题。
-- 题库：LLM 生成 + SymPy 验证答案，本地缓存并随使用增长；选题按画像档位。
 - 每题测两个维度：**概念熟悉度**（"听过这个吗？"→ 术语接受度估计）+ **计算正确性**（算一遍）。
 - 结果 → 画像档位（小学/初中/高中/大学/研究）+ 三维系数（familiarity / computation / terminology），注入 system prompt 控制解释的专业程度。
 - 可跳过（默认档位：高中）；可随时在设置中重测。
 
+**首启流程（无 key 门禁）**：
+- 未配置 key → 应用首页为**配置引导页**（BYOK 录入）；聊天/测试均依赖 LLM，无 key 时不开放。
+- 有 key 未测试 → 显示测试向导（可跳过）。
+- 已测试 → 聊天主页。
+
 ## 6. 记忆系统
 
-三层，全部本地 SQLite：
+三层核心记忆（会话历史 / 知识点时间线 / 用户画像）+ 错误联想库（衍生存储），全部本地 SQLite：
 
 | 层 | 内容 | 用途 |
 |---|---|---|
 | 会话历史 | 全部消息（含 topics 标注），跨会话全文检索 | "之前问过 X"、相关历史摘要 |
 | 知识点时间线 | 知识点 + 状态（问过/困惑/答错/掌握）+ 时间与次数 | 关联卡片、难度参考 |
-| 用户画像 | 档位 + 三维系数 + 常犯错误类型 | 控制解释专业程度 |
+| 用户画像 | 档位 + 三维系数 | 控制解释专业程度 |
+| 错误联想库 | misconception 表（kp、原因、最小反例、次数） | 纠错模式上下文 + 反哺测试选题 |
 
 生命周期：
 
-- 写入：阶段 2 结束后异步写入（知识点归一化合并别名、画像增量更新、错误类型累计）。
-- 读取：阶段 2 上下文组装时读取（该知识点历史 + 相关知识点 ≤3 + 相关问答摘要）。
-- 管理：记忆面板可见、可编辑、一键清空、导出 JSON。
-- 审计：所有更新走 `memory_event` 追加式日志，可回滚。
+- 写入：阶段 2 结束后异步写入（知识点归一化合并别名、画像增量更新、misconception 累计计数）。
+- 读取：阶段 2 上下文组装时读取（该知识点历史 + 相关知识点 ≤3 + 相关问答摘要 + 高频 misconception）。
+- 检索实现：历史全文检索优先 SQLite FTS5（运行时可用时），否则 LIKE 兜底。
+- 管理：记忆面板可见、可编辑、一键清空、导出 JSON（导出结构：`{profile, topics, messages, misconceptions}`）。
+- 审计：所有更新走 `memory_event` 追加式日志；回滚语义 = 清空 + 导入导出的 JSON 快照。
 
 ## 7. 数据模型（SQLite DDL）
 
@@ -185,6 +195,16 @@ CREATE TABLE kp_status (
   last_asked_at  TEXT,
   ask_count      INTEGER DEFAULT 0,
   mistake_count  INTEGER DEFAULT 0
+);
+
+-- 错误联想库（纠错模式上下文 + 反哺测试选题）
+CREATE TABLE misconception (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  kp_id          TEXT REFERENCES knowledge_point(id),
+  cause          TEXT,                -- 错误联想原因（如 分配律滥用）
+  example        TEXT,                -- 最小反例
+  count          INTEGER DEFAULT 1,   -- 出现次数，选题按此排序
+  last_seen_at   TEXT
 );
 
 -- 会话历史
@@ -220,7 +240,8 @@ CREATE TABLE api_key (
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/chat` | 阶段 1+2 完整管线，SSE 流式返回 reply 与结构化元数据 |
+| POST | `/api/chat` | 阶段 1+2 完整管线，SSE 流式（请求体 `{message, session_id?}`） |
+| POST | `/api/plot/from-expr` | 公式 → plot_spec（复用阶段 1 分析的 needs_plot 分支，"画出来"按钮入口） |
 | POST | `/api/assess/submit` | 入门测试逐题提交，返回画像更新 |
 | GET | `/api/assess/next` | 取下一道测试题（按档位选题） |
 | POST | `/api/plot` | plot_spec → 点集（SymPy 采样） |
@@ -234,6 +255,18 @@ CREATE TABLE api_key (
 | POST | `/api/settings/retest` | 触发重测 |
 | GET | `/api/usage` | 本机记账（每 key 用量/费用估算） |
 
+**SSE 事件契约（/api/chat）**：
+
+```
+event: meta       {question_type, contains_error, topics}
+event: assertion  {index, claim, status: verified|failed|unverified}
+event: delta      {text}              -- reply_markdown 流式增量
+event: card       {related_topics: [...], history_link: {topic, session_ref}}
+event: exercise   {followup_exercise}
+event: done       {}
+event: error      {code, message}
+```
+
 错误约定：统一 `{"error": {"code", "message", "detail?"}}`；LLM 调用失败时聊天接口降级为"重试中"，不中断会话。
 
 ## 9. 错误处理与验证状态
@@ -243,7 +276,7 @@ CREATE TABLE api_key (
 - SymPy 验证失败区分两种：**断言错误**（LLM 幻觉）→ 修正标注后展示；**验证器无能为力** → ⚠️ 未验证标注。
 - 不变量：**验证失败的断言绝不展示为"已验证"**。
 - 未成年人/隐私：数据仅存本机；记忆可一键清空；导出功能供用户自持数据。
-- 成本：本机记账，无强制配额（BYOK 场景约束力弱但足够）。
+- 成本：本机记账（记录每次调用的 token 数与耗时）；费用估算需用户配置各厂商单价，未配置时仅显示用量。
 
 ## 10. 测试策略
 
@@ -259,7 +292,7 @@ CREATE TABLE api_key (
 
 1. `memory_event` 只增不改；
 2. 验证失败的断言不展示为"已验证"；
-3. compute 类问题不产生 LLM 生成内容（只走 SymPy + 措辞层）。
+3. compute 类问题的数学结论必须经 SymPy 验证后才展示（LLM 不判定数学正确性）。
 
 ## 11. UI 布局（5 区块，中文界面）
 
@@ -274,4 +307,4 @@ CREATE TABLE api_key (
 - PyInstaller 打包为自包含桌面应用（架构不变）。
 - 局域网访问（手机同网使用，FastAPI 绑定 0.0.0.0 + 只读鉴权）。
 - 向量语义记忆（本地 embedding 或用户 key 调 embedding API）。
-- 题库随使用增长 + 常见错误联想库反哺测试选题。
+- 题库自动增长机制（MVP 为按需生成的固定容量缓存）。
