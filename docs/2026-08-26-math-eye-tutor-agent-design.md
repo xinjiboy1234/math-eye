@@ -78,7 +78,7 @@ Electron/双进程、Pyodide/WASM、知识图谱迷雾地图、Elo 掌握度、�
 - 单进程；浏览器仅与 localhost 同源通信。
 - **API key 永不出现在浏览器上下文**：Python 进程持有，从 keyring 读取后注入请求头，只发往该 provider 的 baseURL。
 - 启动：`uv run start` 或双击 `start.bat` → 自动打开浏览器；`Ctrl+C` 退出。端口固定 8765，占用时提示并给出 `--port` 参数。
-- **本地安全**：所有 API 校验 `Origin`/`Host` 头（仅允许 `http://localhost:8765` 与 `http://127.0.0.1:8765`），防止本地网页驱动本服务（如 `DELETE /api/memory`、消耗用户 key）；keyring 降级配置文件路径 `~/.matheye/config.json`（0600 权限）。
+- **本地安全**：所有 API 校验 `Origin`/`Host` 头，允许列表在启动时按实际绑定 host:port 生成（localhost 与 127.0.0.1 两种形式，随 `--port` 变化），防止本地网页驱动本服务（如 `DELETE /api/memory`、消耗用户 key）；keyring 降级配置文件路径 `~/.matheye/config.json`（0600 权限）。
 - 桌面打包（PyInstaller）列为后置选项，不改变架构。
 
 ## 4. 两阶段管线
@@ -106,8 +106,8 @@ Electron/双进程、Pyodide/WASM、知识图谱迷雾地图、Elo 掌握度、�
 - `plot_spec.sliders`：自由符号参数成为前端滑动条（联动重算），默认范围由阶段 1 给出。
 - `compute_spec`：compute 类问题由阶段 1 在此给出计算表达式（流式开始前已确定，见 §4.2）。
 
-- 本地规则兜底：检测 `solve/diff/integrate/化简` 等命令词 → 直接判 `compute`，跳过部分 LLM 调用以省 token。
-- `plot_spec` 中的表达式由阶段 2 校验：SymPy `parse_expr` 解析 + 采样前语法验证，解析失败要求重生成。
+- 本地规则兜底：检测 `solve/diff/integrate/化简` 等命令词 → 直接判 `compute`，跳过部分 LLM 调用以省 token；阶段 1 的 LLM **调用失败**同样降级到本地规则（至少可识别 compute 命令词），整体调用失败才走 §9 的"重试中"。
+- `plot_spec` 中的表达式在阶段 1 输出时即校验（SymPy `parse_expr` 解析 + 语法验证），校验失败重试一次；仍失败 → `needs_plot=false` 并提示无法绘图——校验发生在 `meta` 事件发出前。
 - 结构化输出解析失败 → 重试一次（带上次输出提示修正）；两次仍失败 → 本地规则兜底（默认按 conceptual、无错误、无绘图处理），流程继续不中断。
 
 ### 4.2 阶段 2：回答（主调用，SSE 流式）
@@ -137,7 +137,7 @@ Electron/双进程、Pyodide/WASM、知识图谱迷雾地图、Elo 掌握度、�
 1. 区分三种错误：**问题本身含错误假设** / **推理过程错** / **结论错但过程对**——处理方式不同。
 2. 给出**可能的错误联想路径**：推断用户为何会这样想（如把 (a+b)² 错写成 a²+b² → 分配律滥用），用**最小反例**纠正，不直接说"错了"。
 3. 阶段 2 纠错模式结构化输出 `error_type / cause / example`（error_type ∈ hypothesis / process / conclusion），写入 misconception 表（§6/§7），反哺测试选题（§5）。
-4. 纠错后提供一道**同型验证题**（可选按钮，生命周期接口见 §8 `/api/exercise/*`），答对才记 `掌握`，否则记 `困惑`。
+4. 纠错后提供一道**同型验证题**（可选按钮，生命周期接口见 §8 `/api/exercise/*`），答对才记 `掌握`；答错记 `mistaken`（命中已知 misconception）或 `confused`（其他）。
 
 ### 4.4 绘图数据流
 
@@ -148,7 +148,7 @@ Electron/双进程、Pyodide/WASM、知识图谱迷雾地图、Elo 掌握度、�
 - 题库：LLM 按档位生成 + SymPy 验证答案，存 `question` 表（DDL 见 §7）；**容量策略**：每档位上限（默认 50 题），超出按 `used_count` LRU 淘汰；**生成归属**：`/api/assess/next` 命中缓存直接返回，未命中时同步生成（LLM + SymPy 验证）后缓存——首启首次取题有一次生成延迟；**选题规则**：按档位随机抽取，该档位高频 misconception 关联知识点加权（权重 = 1 + 0.5·log(count)，见 §6）。题库自动增长机制属后续可选，见 §12。
 - 首次启动展示向导：选年龄段/学历 → 对应档位题库抽 3-5 题。
 - 每题测两个维度：**概念熟悉度**（"听过这个吗？"→ 术语接受度估计）+ **计算正确性**（算一遍）。
-- 结果 → 画像档位（小学/初中/高中/大学/研究）+ 三维系数（familiarity / computation / terminology），注入 system prompt 控制解释的专业程度。**档位规则**：`level_band` 初值 = 用户所选学历，测试后解释档位由 `level_band` + 三维系数共同推导；测试结果与所选学历冲突时以测试结果为准并提示用户。`age_band` 与知识水平正交：仅用于语风（儿童/成人）与内容边界（未成年人），不参与难度推导。
+- 结果 → 画像档位（小学/初中/高中/大学/研究）+ 三维系数（familiarity / computation / terminology），注入 system prompt 控制解释的专业程度。**档位规则**：`level_band` 初值 = 用户所选学历；测试后**解释档位 = 基础档位经系数调整**（确定性规则）：`familiarity` 与 `terminology` 均 ≥ 0.7 且 `computation` ≥ 0.7 → 升一档；任一系数 ≤ 0.3 → 降一档；其余保持，结果夹在 primary..research 范围。测试结果与所选学历冲突时以测试结果为准并提示用户。`age_band` 与知识水平正交：仅用于语风（儿童/成人）与内容边界（未成年人），不参与难度推导。
 - 可跳过（默认档位：高中）；可随时在设置中重测。
 
 **首启流程（无 key 门禁）**：
@@ -224,7 +224,7 @@ CREATE TABLE question (
   level_band     TEXT,                -- 对应档位
   kind           TEXT,                -- concept / computation
   body           TEXT NOT NULL,       -- JSON：题干 + 选项/期望答案
-  answer_verified TEXT,               -- SymPy 验证过的答案
+  answer_verified TEXT,               -- SymPy 验证过的答案（仅 computation 类必填；concept 类为空——概念题为经验性判断，无计算答案）
   used_count     INTEGER DEFAULT 0,   -- 出题次数，LRU 淘汰依据
   created_at     TEXT
 );
@@ -275,10 +275,10 @@ CREATE TABLE usage_log (
 |---|---|---|
 | POST | `/api/chat` | 阶段 1+2 完整管线，SSE 流式（请求体 `{message, session_id?}`） |
 | POST | `/api/plot/from-expr` | 公式 → plot_spec（复用阶段 1 分析的 needs_plot 分支，"画出来"按钮入口） |
-| POST | `/api/assess/submit` | 入门测试逐题提交，返回画像更新 |
+| POST | `/api/assess/submit` | 入门测试逐题提交，返回画像更新（向导首步同时提交 age_band / level_band） |
 | GET | `/api/assess/next` | 取下一道测试题（按档位选题；缓存未命中时同步生成） |
 | POST | `/api/exercise/generate` | 生成同型验证题（LLM + SymPy 验证答案），请求体 `{kp_id?}` |
-| POST | `/api/exercise/submit` | 提交习题答案：SymPy 与已验证答案比较判定 → 更新 kp_status（答对→mastered，答错→mistaken/confused）→ 返回判定与反馈 |
+| POST | `/api/exercise/submit` | 提交习题答案：SymPy 与已验证答案比较判定 → 更新 kp_status（答对→mastered；答错→mistaken 命中已知 misconception / confused 其他）→ 返回判定与反馈 |
 | POST | `/api/plot` | plot_spec → 点集（SymPy 采样） |
 | GET | `/api/memory/topics` | 知识点时间线 |
 | GET | `/api/memory/history?q=` | 会话历史检索 |
@@ -302,6 +302,8 @@ event: exercise   {followup_exercise}
 event: done       {}
 event: error      {code, message}
 ```
+
+上表为事件**类型目录**而非时序；实际顺序见 §4.2：`meta` → `delta` 流（占位符 ⏳）→ 流结束后的 `assertion` → `card`/`exercise` → `done`。
 
 - `exercise` 事件：纠错模式回答末尾内联附一道同型题；"再练一道"按钮 → `POST /api/exercise/generate` 显式请求另一道（按钮是唯一显式触发）。
 
@@ -341,6 +343,8 @@ event: error      {code, message}
 3. **记忆面板**：画像档位、知识点时间线、历史检索；可编辑/清空/导出。
 4. **设置**：BYOK 多厂商录入（掩码显示）、模型选择、重测入口、用量统计。
 5. **入门测试向导**：首次启动引导。
+
+各区块对应接口：对话区 → `/api/chat`；绘图面板 → `/api/plot`、`/api/plot/from-expr`；记忆面板 → `/api/memory/*`；设置 → `/api/settings/*`、`/api/usage`；测试/习题 → `/api/assess/*`、`/api/exercise/*`。
 
 ## 12. 后续可选（不阻塞 MVP）
 
