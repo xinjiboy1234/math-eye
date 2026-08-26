@@ -78,6 +78,7 @@ Electron/双进程、Pyodide/WASM、知识图谱迷雾地图、Elo 掌握度、�
 - 单进程；浏览器仅与 localhost 同源通信。
 - **API key 永不出现在浏览器上下文**：Python 进程持有，从 keyring 读取后注入请求头，只发往该 provider 的 baseURL。
 - 启动：`uv run start` 或双击 `start.bat` → 自动打开浏览器；`Ctrl+C` 退出。端口固定 8765，占用时提示并给出 `--port` 参数。
+- **本地安全**：所有 API 校验 `Origin`/`Host` 头（仅允许 `http://localhost:8765` 与 `http://127.0.0.1:8765`），防止本地网页驱动本服务（如 `DELETE /api/memory`、消耗用户 key）；keyring 降级配置文件路径 `~/.matheye/config.json`（0600 权限）。
 - 桌面打包（PyInstaller）列为后置选项，不改变架构。
 
 ## 4. 两阶段管线
@@ -107,7 +108,7 @@ Electron/双进程、Pyodide/WASM、知识图谱迷雾地图、Elo 掌握度、�
 
 - 本地规则兜底：检测 `solve/diff/integrate/化简` 等命令词 → 直接判 `compute`，跳过部分 LLM 调用以省 token。
 - `plot_spec` 中的表达式由阶段 2 校验：SymPy `parse_expr` 解析 + 采样前语法验证，解析失败要求重生成。
-- 结构化输出解析失败 → 重试一次（带上次输出提示修正）。
+- 结构化输出解析失败 → 重试一次（带上次输出提示修正）；两次仍失败 → 本地规则兜底（默认按 conceptual、无错误、无绘图处理），流程继续不中断。
 
 ### 4.2 阶段 2：回答（主调用，SSE 流式）
 
@@ -126,6 +127,7 @@ Electron/双进程、Pyodide/WASM、知识图谱迷雾地图、Elo 掌握度、�
 - **流式与验证的顺序契约**：`delta` 事件可先行渲染（占位符显示 ⏳ 验证中），流结束后后端逐条验证并发出 `assertion` 事件，前端据状态更新徽标——**任何断言在对应 assertion 事件到达且 status=verified 前绝不显示 ✅**。
 - **验证算法（按断言类型）**：恒等式 → `simplify(lhs - rhs) == 0`；解集 → 解集无序集合比较；导数/积分 → 符号 diff/integrate 对照 `expected`；`expected` 由引擎按类型复算或语义比较，不信任 LLM 自报结果。
 - 结果：通过 → ✅；失败 → ❌（修正标注后展示）；`sympy_expr` 解析失败 → ⚠️ 未验证。
+- 悬挂占位符兜底：断言事件超时（默认 30s）未到达或声明数少于占位符数 → 对应锚定按 ⚠️ 未验证处理，不悬挂 ⏳。
 - 不变量：验证失败/未验证的断言绝不展示为"已验证"。
 
 ### 4.3 纠错模式（需求 4）
@@ -134,19 +136,19 @@ Electron/双进程、Pyodide/WASM、知识图谱迷雾地图、Elo 掌握度、�
 
 1. 区分三种错误：**问题本身含错误假设** / **推理过程错** / **结论错但过程对**——处理方式不同。
 2. 给出**可能的错误联想路径**：推断用户为何会这样想（如把 (a+b)² 错写成 a²+b² → 分配律滥用），用**最小反例**纠正，不直接说"错了"。
-3. 结构化输出 `error_type / misconception / example`，积累"常见错误联想"记录（进记忆，反哺入口测试题库选题）。
+3. 阶段 2 纠错模式结构化输出 `error_type / cause / example`（error_type ∈ hypothesis / process / conclusion），写入 misconception 表（§6/§7），反哺测试选题（§5）。
 4. 纠错后提供一道**同型验证题**（可选按钮，生命周期接口见 §8 `/api/exercise/*`），答对才记 `掌握`，否则记 `困惑`。
 
 ### 4.4 绘图数据流
 
-`plot_spec` → `POST /api/plot`：SymPy `lambdify` 采样（函数/参数/极坐标/隐式）→ 返回点集 → JSXGraph 渲染。滑动条防抖 100ms 重算（localhost 延迟可忽略）。回答中的公式可一键"画出来"（公式 → plot_spec → 同一渲染路径）。
+`plot_spec` → `POST /api/plot`：SymPy `lambdify` 采样（函数/参数/极坐标/隐式）→ 返回点集 → JSXGraph 渲染。滑动条防抖 100ms 重算（localhost 延迟可忽略）。回答中的公式可一键"画出来"（公式 → `/api/plot/from-expr` → plot_spec → 同一渲染路径）。**聊天触发的自动绘图**：阶段 1 的 `needs_plot` + `plot_spec` 随 SSE `meta` 事件下发（§8），前端据此渲染绘图面板。
 
 ## 5. 入口测试（需求 1）
 
-- 题库：LLM 按档位生成 + SymPy 验证答案，存 `question` 表（DDL 见 §7）；**容量策略**：每档位上限（默认 50 题），超出按 `used_count` LRU 淘汰；**生成归属**：`/api/assess/next` 命中缓存直接返回，未命中时同步生成（LLM + SymPy 验证）后缓存——首启首次取题有一次生成延迟。题库自动增长机制属后续可选，见 §12。
+- 题库：LLM 按档位生成 + SymPy 验证答案，存 `question` 表（DDL 见 §7）；**容量策略**：每档位上限（默认 50 题），超出按 `used_count` LRU 淘汰；**生成归属**：`/api/assess/next` 命中缓存直接返回，未命中时同步生成（LLM + SymPy 验证）后缓存——首启首次取题有一次生成延迟；**选题规则**：按档位随机抽取，该档位高频 misconception 关联知识点加权（权重 = 1 + 0.5·log(count)，见 §6）。题库自动增长机制属后续可选，见 §12。
 - 首次启动展示向导：选年龄段/学历 → 对应档位题库抽 3-5 题。
 - 每题测两个维度：**概念熟悉度**（"听过这个吗？"→ 术语接受度估计）+ **计算正确性**（算一遍）。
-- 结果 → 画像档位（小学/初中/高中/大学/研究）+ 三维系数（familiarity / computation / terminology），注入 system prompt 控制解释的专业程度。**档位规则**：`level_band` 初值 = 用户所选学历，测试后解释档位由 `level_band` + 三维系数共同推导；测试结果与所选学历冲突时以测试结果为准并提示用户。
+- 结果 → 画像档位（小学/初中/高中/大学/研究）+ 三维系数（familiarity / computation / terminology），注入 system prompt 控制解释的专业程度。**档位规则**：`level_band` 初值 = 用户所选学历，测试后解释档位由 `level_band` + 三维系数共同推导；测试结果与所选学历冲突时以测试结果为准并提示用户。`age_band` 与知识水平正交：仅用于语风（儿童/成人）与内容边界（未成年人），不参与难度推导。
 - 可跳过（默认档位：高中）；可随时在设置中重测。
 
 **首启流程（无 key 门禁）**：
@@ -169,7 +171,7 @@ Electron/双进程、Pyodide/WASM、知识图谱迷雾地图、Elo 掌握度、�
 
 - 写入：阶段 2 结束后异步写入（知识点归一化合并别名、画像增量更新、misconception 累计计数）。
 - 读取：阶段 2 上下文组装时读取（该知识点历史 + 相关知识点 ≤3 + 相关问答摘要 + 高频 misconception）。
-- 检索实现：历史全文检索优先 SQLite FTS5（运行时可用时），否则 LIKE 兜底。
+- 检索实现：历史全文检索优先 SQLite FTS5（虚拟表与同步触发器随主表在实现时创建），否则 LIKE 兜底。
 - 管理：记忆面板可见、可编辑、一键清空、导出 JSON（导出结构：`{profile, topics, messages, misconceptions}`）。
 - 审计：所有更新走 `memory_event` 追加式日志；**例外：一键清空为整表删除**（隐私优先，不保留审计）；回滚语义 = 清空 + `POST /api/memory/import` 导入导出的 JSON 快照（设置页"从备份恢复"）。
 
@@ -241,7 +243,7 @@ CREATE INDEX idx_msg_session ON message(session_id, created_at);
 -- 记忆事件（追加式审计日志）
 CREATE TABLE memory_event (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
-  type           TEXT,                -- profile_update / kp_update / memory_clear / export
+  type           TEXT,                -- profile_update / kp_update / export（清空不留审计，见 §6）
   payload        TEXT,                -- JSON
   created_at     TEXT
 );
@@ -252,6 +254,17 @@ CREATE TABLE api_key (
   key_ref        TEXT,                -- keyring 服务名/用户名
   base_url       TEXT,                -- OpenAI-compatible 自定义端点
   model          TEXT,
+  created_at     TEXT
+);
+
+-- LLM 用量记账（本机，见 §9）
+CREATE TABLE usage_log (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  provider       TEXT,
+  model          TEXT,
+  tokens_in      INTEGER,
+  tokens_out     INTEGER,
+  latency_ms     INTEGER,
   created_at     TEXT
 );
 ```
@@ -281,7 +294,7 @@ CREATE TABLE api_key (
 **SSE 事件契约（/api/chat）**：
 
 ```
-event: meta       {question_type, contains_error, topics}
+event: meta       {question_type, contains_error, topics, needs_plot, plot_spec?}
 event: assertion  {index, claim, status: verified|failed|unverified}
 event: delta      {text}              -- reply_markdown 流式增量
 event: card       {related_topics: [...], history_link: {topic, session_ref}}
@@ -289,6 +302,8 @@ event: exercise   {followup_exercise}
 event: done       {}
 event: error      {code, message}
 ```
+
+- `exercise` 事件：纠错模式回答末尾内联附一道同型题；"再练一道"按钮 → `POST /api/exercise/generate` 显式请求另一道（按钮是唯一显式触发）。
 
 错误约定：统一 `{"error": {"code", "message", "detail?"}}`；LLM 调用失败时聊天接口降级为"重试中"，不中断会话。
 
