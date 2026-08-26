@@ -78,7 +78,7 @@ Electron/双进程、Pyodide/WASM、知识图谱迷雾地图、Elo 掌握度、�
 - 单进程；浏览器仅与 localhost 同源通信。
 - **API key 永不出现在浏览器上下文**：Python 进程持有，从 keyring 读取后注入请求头，只发往该 provider 的 baseURL。
 - 启动：`uv run start` 或双击 `start.bat` → 自动打开浏览器；`Ctrl+C` 退出。端口固定 8765，占用时提示并给出 `--port` 参数。
-- **本地安全**：所有 API 校验 `Origin`/`Host` 头，允许列表在启动时按实际绑定 host:port 生成（localhost 与 127.0.0.1 两种形式，随 `--port` 变化），防止本地网页驱动本服务（如 `DELETE /api/memory`、消耗用户 key）；keyring 降级配置文件路径 `~/.matheye/config.json`（0600 权限）。
+- **本地安全**：所有 API 校验 `Origin`/`Host` 头，允许列表在启动时按实际绑定 host:port 生成（localhost / 127.0.0.1 / [::1] 三种形式，随 `--port` 变化），防止本地网页驱动本服务（如 `DELETE /api/memory`、消耗用户 key）；keyring 降级配置文件路径 `~/.matheye/config.json`（0600 权限）；**LLM 输出视为不可信 DOM 输入**，前端渲染前经 DOMPurify 消毒（KaTeX 白名单渲染）。
 - 桌面打包（PyInstaller）列为后置选项，不改变架构。
 
 ## 4. 两阶段管线
@@ -105,6 +105,7 @@ Electron/双进程、Pyodide/WASM、知识图谱迷雾地图、Elo 掌握度、�
 
 - `plot_spec.sliders`：自由符号参数成为前端滑动条（联动重算），默认范围由阶段 1 给出。
 - `compute_spec`：compute 类问题由阶段 1 在此给出计算表达式（流式开始前已确定，见 §4.2）。
+- `claimed_answer`：`contains_error=true` 时，阶段 1 提取用户消息中声称的答案，用于与引擎计算结果比较（见 §4.2 分支组合规则）。
 
 - 本地规则兜底：检测 `solve/diff/integrate/化简` 等命令词 → 直接判 `compute`，跳过部分 LLM 调用以省 token；阶段 1 的 LLM **调用失败**同样降级到本地规则（至少可识别 compute 命令词）；仅当网关重试一次后仍失败（§9 的"重试中"）才中断本请求。
 - `plot_spec` 中的表达式在阶段 1 输出时即校验（SymPy `parse_expr` 解析 + 语法验证），校验失败重试一次；仍失败 → `needs_plot=false` 并提示无法绘图——校验发生在 `meta` 事件发出前。
@@ -118,10 +119,12 @@ Electron/双进程、Pyodide/WASM、知识图谱迷雾地图、Elo 掌握度、�
 分支：
 
 - `question_type = compute` → 计算由阶段 1 的 `compute_spec` 给出、后端 SymPy 执行，**LLM 不判定数学正确性**；解释/步骤由 LLM 措辞，其中每个可验证断言经 SymPy 验证（验证通过才标 ✅；验证失败时该断言降级为 ❌/⚠️，不阻断回答）。
-- `contains_error = true` → **纠错模式**（见 §4.3）。
+- `contains_error = true` → **纠错模式**（见 §4.3），优先于 compute 分支并扩展之。
 - 其余 → 常规回答模式。
 
-输出：`reply_markdown`（KaTeX 渲染）+ `topics` + 关联卡片数据 + 可选 `followup_exercise`（"再练一道"按钮触发，LLM 生成 + SymPy 验证答案）。**关联卡片机制**：基于知识点记忆共现统计 + LLM 判断生成，取 ≤3 条密切相关。
+**分支组合规则（compute × contains_error）**：两者可同时成立。此时 SymPy 执行 `compute_spec` 得到权威结果，阶段 1 提取的 `claimed_answer` 与引擎结果比较（数值/符号等价）；回答按纠错模式生成（error_type/cause/example + misconception 写入 + 自动同型题，见 §4.3），引擎结果为纠错提供权威参照——"结论错但过程对"这一错误类型即在此组合下产生。
+
+输出：`reply_markdown`（KaTeX 渲染）+ `topics` + 关联卡片数据。**同型题**：纠错模式经 SSE `exercise` 事件内联附一道（LLM 生成 + SymPy 验证答案）；"再练一道"按钮 → `POST /api/exercise/generate` 另取一道（§8）。**关联卡片机制**：基于知识点记忆共现统计 + LLM 判断生成，取 ≤3 条密切相关。
 
 **验证流程（断言由生成方声明，验证由确定性引擎执行）**：
 - 阶段 2 输出除 `reply_markdown` 外，附带 `assertions: [{claim, sympy_expr, expected}]`——LLM 声明它做出的每个可验证数学断言，`sympy_expr` 为 SymPy 可解析形式；`reply_markdown` 中用 `{{assert:N}}` 占位符锚定每条断言在文中的位置。
@@ -146,10 +149,10 @@ Electron/双进程、Pyodide/WASM、知识图谱迷雾地图、Elo 掌握度、�
 
 ## 5. 入口测试（需求 1）
 
-- 题库：LLM 按档位生成 + SymPy 验证答案，存 `question` 表（DDL 见 §7）；**容量策略**：每档位上限（默认 50 题），超出按 `used_count` LRU 淘汰；**生成归属**：`/api/assess/next` 命中缓存直接返回，未命中时同步生成（LLM + SymPy 验证）后缓存——首启首次取题有一次生成延迟；**选题规则**：按档位随机抽取，该档位高频 misconception 关联知识点加权（权重 = 1 + 0.5·log(count)，见 §6）。题库自动增长机制属后续可选，见 §12。
+- 题库：LLM 按档位生成，computation 类答案经 SymPy 验证（concept 类为经验性题目，无计算答案），存 `question` 表（DDL 见 §7）；**容量策略**：每档位上限（默认 50 题），超出按 `used_count` LRU 淘汰；**生成归属**：`/api/assess/next` 命中缓存直接返回，未命中时同步生成（LLM + SymPy 验证）后缓存——首启首次取题有一次生成延迟；**选题规则**：按档位随机抽取，该档位高频 misconception 关联知识点加权（权重 = 1 + 0.5·log(count)，见 §6）。题库自动增长机制属后续可选，见 §12。
 - 首次启动展示向导：选年龄段/学历 → 对应档位题库抽 3-5 题。
-- 每题测两个维度：**概念熟悉度**（"听过这个吗？"→ 术语接受度估计）+ **计算正确性**（算一遍）。
-- 结果 → 画像档位（小学/初中/高中/大学/研究）+ 三维系数（familiarity / computation / terminology），注入 system prompt 控制解释的专业程度。**档位规则**：`level_band` 初值 = 用户所选学历；测试后**解释档位 = 基础档位经系数调整**（确定性规则）：`familiarity` 与 `terminology` 均 ≥ 0.7 且 `computation` ≥ 0.7 → 升一档；任一系数 ≤ 0.3 → 降一档；其余保持，结果夹在 primary..research 范围。测试结果与所选学历冲突时以测试结果为准并提示用户。`age_band` 与知识水平正交：仅用于语风（child/teen → 儿童语气，adult/researcher → 成人语气）与内容边界（未成年人），不参与难度推导。
+- 概念类题测**概念熟悉度**（"听过这个吗？"）与**术语接受度**（"能看懂符号吗"）；计算类题测**计算正确性**（算一遍）——两维度映射见下方。
+- 结果 → 画像档位（小学/初中/高中/大学/研究）+ 三维系数（familiarity / computation / terminology），注入 system prompt 控制解释的专业程度。**档位规则**：`level_band` 初值 = 用户所选学历；测试后**解释档位 = 基础档位经系数调整**（确定性规则，推理时实时推导、不落库，仅 `level_band` 与三系数落库）：`familiarity` 与 `terminology` 均 ≥ 0.7 且 `computation` ≥ 0.7 → 升一档；任一系数 ≤ 0.3 → 降一档；其余保持，结果夹在 primary..research 范围。测试结果与所选学历冲突时以测试结果为准并提示用户。`age_band` 与知识水平正交：仅用于语风（child/teen → 儿童语气，adult/researcher → 成人语气）与内容边界（未成年人），不参与难度推导。
 - **维度映射与聚合**：概念题（"听过这个吗？"）更新 `familiarity`，并据"能看懂符号吗"的回答同步更新 `terminology` 估计；计算题更新 `computation`；3-5 题结果取均值（熟悉/正确 = 1，不熟/错误 = 0，部分 = 0.5）。
 - 可跳过（默认档位：高中）；可随时在设置中重测。
 
@@ -290,7 +293,7 @@ CREATE TABLE usage_log (
 | GET | `/api/memory/export` | 导出 JSON |
 | POST | `/api/memory/import` | 导入 JSON 快照（回滚/从备份恢复） |
 | GET/POST | `/api/settings/keys` | BYOK 多厂商录入/列表（掩码显示，不返回明文） |
-| DELETE | `/api/settings/keys/{provider}` | 删除某厂商 key；主 provider 由设置页当前选中项决定（存 config） |
+| DELETE | `/api/settings/keys/{provider}` | 删除某厂商 key；主 provider 由设置页当前选中项决定（存 config）；若删除的是当前主 provider → 回退到其余 provider 中最近使用的，无剩余则进入配置引导页 |
 | POST | `/api/settings/retest` | 触发重测 |
 | GET | `/api/usage` | 本机记账（每 key 用量/费用估算） |
 
@@ -314,7 +317,7 @@ event: error      {code, message}
 
 ## 9. 错误处理与验证状态
 
-- LLM 调用失败 → 重试一次 → 仍失败返回"重试中"提示。
+- LLM 调用失败 → 重试一次 → 仍失败经 SSE `error` 事件（code=`llm_unavailable`）+ `done` 下发，前端渲染重试按钮；聊天接口普通错误同此。
 - 结构化输出解析失败 → 带上次输出重试一次。
 - SymPy 验证失败区分两种：**断言错误**（LLM 幻觉）→ 修正标注后展示；**验证器无能为力** → ⚠️ 未验证标注。
 - 不变量：**验证失败的断言绝不展示为"已验证"**。
@@ -331,6 +334,8 @@ event: error      {code, message}
 | 管线集成 | pytest | 阶段 1→2 全链路、纠错模式分支、验证徽标、断言锚定（占位符↔assertion 事件） |
 | LLM 网关 | pytest + mock | 重试、结构化输出解析失败重试、失败降级（"重试中"） |
 | SSE 契约 | pytest | 事件序列与载荷 schema（meta/delta/assertion/card/exercise/done/error） |
+| 安全 | pytest | Origin/Host 白名单（含 --port 变体）、key 掩码与删除防护、DELETE /api/memory 守卫 |
+| 绘图 | pytest | /api/plot 与 /api/plot/from-expr 点集契约（函数/参数/极坐标/隐式） |
 | E2E | Playwright | 启动 → 入门测试 → 提问 → 绘图 → 关联卡片 → 记忆更新闭环 |
 
 关键不变量（写成自动化断言）：
